@@ -1,4 +1,7 @@
-; Inno Setup script for the Windows installer. CI passes /DAppVersion=... /DSrcExe=... /DOutDir=...
+; Inno Setup script for the Windows installer. CI passes /DAppVersion=... /DSrcDir=<standalone folder> /DOutDir=... /DArch=x64|arm64
+#ifndef Arch
+  #define Arch "x64"
+#endif
 #ifndef AppVersion
   #define AppVersion "2.0.0"
 #endif
@@ -15,19 +18,29 @@ DefaultGroupName=TrueDuty
 DisableProgramGroupPage=yes
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir={#OutDir}
-OutputBaseFilename=TrueDuty-Setup-{#AppVersion}-windows-x64
+OutputBaseFilename=TrueDuty-Setup-{#AppVersion}-windows-{#Arch}
 SetupIconFile=..\assets\icon.ico
 UninstallDisplayIcon={app}\TrueDuty.exe
 LicenseFile=..\..\LICENSE
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+#if Arch == "arm64"
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+#else
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+#endif
+VersionInfoVersion={#AppVersion}
+VersionInfoCompany=QudsLab
+VersionInfoDescription=TrueDuty installer
+VersionInfoCopyright=Copyright (c) QudsLab. MIT License.
+SignedUninstaller=no
 CloseApplications=yes
 
 [Files]
-Source: "{#SrcExe}"; DestDir: "{app}"; DestName: "TrueDuty.exe"; Flags: ignoreversion
+Source: "{#SrcDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\TrueDuty"; Filename: "{app}\TrueDuty.exe"

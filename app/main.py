@@ -262,7 +262,7 @@ def brand_icon(w):
             if not w.winfo_exists(): return
             if OS == 'Windows': w.iconbitmap(os.path.join(ASSETS, 'icon.ico'))
             else:
-                im = tk.PhotoImage(file=os.path.join(ASSETS, 'logo.png')); _icons.append(im); w.iconphoto(True, im)
+                im = tk.PhotoImage(file=os.path.join(ASSETS, 'app-icon.png')); _icons.append(im); w.iconphoto(True, im)
         except Exception: pass
     w.after(300, go); w.after(900, go)
 

@@ -9,26 +9,28 @@ Open source time and activity tracker for Windows, macOS and Linux. It works on 
 
 ## Download
 
-Get the latest build from [Releases](https://github.com/QudsLab/TrueDuty/releases/latest). Every system has two versions:
+Get the latest build from [Releases](https://github.com/QudsLab/TrueDuty/releases/latest).
 
-| System | Installer | Portable |
-|---|---|---|
-| Windows 10/11 x64 | `TrueDuty-Setup-<v>-windows-x64.exe` (Start menu, optional autostart, uninstaller) | `TrueDuty-<v>-windows-x64-portable.exe` |
-| macOS (Apple silicon, Intel) | `TrueDuty-<v>-macos-<arch>.dmg` (drag to Applications) | `TrueDuty-<v>-macos-<arch>-portable.zip` |
-| Linux x64 | `trueduty_<v>_amd64-linux.deb` (`sudo apt install ./trueduty_*.deb`) | `TrueDuty-<v>-linux-x64-portable` (`chmod +x`, run) |
+| System | CPU | Installer | Portable |
+|---|---|---|---|
+| Windows 10/11 | x64 (Intel, AMD) | `TrueDuty-Setup-<v>-windows-x64.exe` | `TrueDuty-<v>-windows-x64-portable.zip` |
+| Windows 11 | ARM64 (Snapdragon) | `TrueDuty-Setup-<v>-windows-arm64.exe` | `TrueDuty-<v>-windows-arm64-portable.zip` |
+| macOS 12+ | Apple silicon | `TrueDuty-<v>-macos-arm64.dmg` or `.pkg` | `TrueDuty-<v>-macos-arm64-portable.zip` |
+| macOS 12+ | Intel | `TrueDuty-<v>-macos-x64.dmg` or `.pkg` | `TrueDuty-<v>-macos-x64-portable.zip` |
+| Linux (Debian, Ubuntu, Mint) | x64 / ARM64 | `trueduty_<v>_amd64.deb` / `_arm64.deb` | `TrueDuty-<v>-linux-<arch>-portable.tar.gz` |
+| Linux (Fedora, RHEL, openSUSE) | x64 / ARM64 | `trueduty-<v>.x86_64.rpm` / `.aarch64.rpm` | same |
+| Any Linux | x64 / ARM64 | `TrueDuty-<v>-linux-<arch>.AppImage` (single file) | same |
 
-The **installer** keeps data in `%APPDATA%\trueduty` (Windows) or `~/.config/trueduty`.
-The **portable** build keeps everything in a `TrueDuty-data` folder next to itself, so it runs from any folder or USB stick and leaves nothing behind. Any build becomes portable when a file named `portable` sits next to it.
+Installers keep data in `%APPDATA%\trueduty` or `~/.config/trueduty`. Portable builds keep everything in a `TrueDuty-data` folder next to the app and leave nothing behind; any build becomes portable when a file named `portable` sits next to it.
 
-### Verify a download
+### Trust and verification
+
+Builds are standalone folders (no self-extracting one-file exe, the usual antivirus false positive), installed by normal installers, with full version metadata. Every file has a Sigstore build provenance attestation and a SHA-256 checksum; Windows Authenticode, Apple notarization, GPG and VirusTotal reports turn on as soon as their secrets are set. Setup and options: [docs/code-signing.md](docs/code-signing.md).
 
 ```
-sha256sum -c SHA256SUMS.txt --ignore-missing          # checksum
-gh attestation verify <file> --repo QudsLab/TrueDuty   # signed build record (Sigstore)
-gpg --verify <file>.asc <file>                         # when the release has .asc files
+sha256sum -c SHA256SUMS.txt --ignore-missing
+gh attestation verify <file> --repo QudsLab/TrueDuty
 ```
-
-Every file carries a GitHub build provenance attestation, which proves it was built by this repository's workflow from a given commit. Windows Authenticode, macOS Developer ID with notarization and GPG signatures are added automatically once the signing secrets are set (see [Releases and signing](#releases-and-signing)).
 
 ## How it works
 
@@ -75,8 +77,8 @@ flowchart LR
 
 ```
 app/                  Desktop tracker (Python, customtkinter)        python app/main.py
-app/build.py          Nuitka build (one file on Windows and Linux, .app on macOS)
-app/packaging/        Windows installer script (Inno Setup)
+app/build.py          Nuitka standalone build (folder, .app on macOS)
+app/packaging/        Installers and portable packages per OS, Windows signing helper
 mobile/               Notes for the Android PWA / TWA wrapper          the page is served by TaskDash at /m
 docs/                 Update plan for the app
 .github/workflows/    Build, package, sign and release
@@ -117,33 +119,15 @@ The device key and token are wrapped with Windows DPAPI on Windows. On macOS and
 
 ## Releases and signing
 
-`.github/workflows/release.yml` runs on every push to `main`, on tags `v*` and by hand from the Actions tab.
+`.github/workflows/release.yml` runs on every push to `main` (release `v2.0.<run>`), on tags `v*` (release with that version) and by hand. It builds six targets (Windows x64/ARM64, macOS arm64/x64, Linux x64/ARM64), signs, packages, checksums, attests, optionally scans with VirusTotal and publishes. If one target fails the others are still published. Packaging scripts are in `app/packaging/`, signing setup in [docs/code-signing.md](docs/code-signing.md).
 
-| Trigger | Release |
-|---|---|
-| Push to `main` | `v2.0.<run number>` |
-| Tag `v1.4.0` | `v1.4.0` |
-
-For each run it builds Windows x64, macOS Apple silicon, macOS Intel and Linux x64 with Nuitka, packages installer and portable versions, writes `.sha256` files and `SHA256SUMS.txt`, attests every file and publishes the release. TaskDash's download page lists new releases by itself. If one system fails, the others are still published.
-
-Platform code signing turns on when these repository secrets exist (Settings, Secrets and variables, Actions):
-
-| Secret | Used for |
-|---|---|
-| `WIN_CERT_PFX_BASE64`, `WIN_CERT_PASSWORD` | Authenticode for the exe and the installer (removes most SmartScreen warnings) |
-| `MAC_CERT_P12_BASE64`, `MAC_CERT_PASSWORD`, `MAC_IDENTITY` | Developer ID signing of the app and the dmg |
-| `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` | Notarization and stapling (no Gatekeeper prompt) |
-| `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` | Detached `.asc` signatures for every file |
-
-Without the Apple secrets the macOS app is ad hoc signed; open it the first time with right click, Open.
-
-Local build: `cd app && python build.py`.
+Local build: `cd app && python build.py` (output in `app/dist/`).
 
 ## License
 
 TrueDuty is released under the [MIT License](LICENSE), copyright QudsLab. You may use, copy, change and ship it, also commercially, as long as the copyright and license notice stay with it.
 
-Third party components bundled in the builds keep their own licenses:
+Third party components bundled in the builds keep their own licenses (full list with links in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)):
 
 | Component | License |
 |---|---|

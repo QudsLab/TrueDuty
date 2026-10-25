@@ -229,12 +229,14 @@ class Engine:
 # ---------------- look ----------------
 # Two independent switches: dark or light, and color or grayscale. Each colour is (light, dark).
 PAL = {
- 'color': dict(BG=('#F4F6F5', '#0A0C0B'), PANEL=('#FFFFFF', '#101413'), PANEL2=('#ECF0EE', '#151A18'), LINE=('#D6DEDA', '#232B28'), INK=('#111614', '#EDF2EF'), MUT=('#49544F', '#A7B2AD'),
-               ACC=('#0D7C47', '#21EB98'), ACC_H=('#0A6B3C', '#4CF2AE'), ON=('#FFFFFF', '#052B1C'), BAD=('#C0392B', '#FF7A6B'), BAD_H=('#A22F23', '#E2604F'), WARN=('#A15C07', '#F5B04C'),
-               WORK=('#0D7C47', '#21EB98'), OFF=('#C2571A', '#F0924E'), UNR=('#B5C1BB', '#4B5C55')),
- 'gray': dict(BG=('#EFEFEF', '#0D0D0D'), PANEL=('#FBFBFB', '#161616'), PANEL2=('#E4E4E4', '#1F1F1F'), LINE=('#D2D2D2', '#2C2C2C'), INK=('#161616', '#EDEDED'), MUT=('#5F5F5F', '#A0A0A0'),
-              ACC=('#262626', '#E8E8E8'), ACC_H=('#404040', '#FFFFFF'), ON=('#FAFAFA', '#111111'), BAD=('#262626', '#E0E0E0'), BAD_H=('#404040', '#FFFFFF'), WARN=('#4A4A4A', '#BDBDBD'),
-              WORK=('#262626', '#E8E8E8'), OFF=('#8A8A8A', '#8F8F8F'), UNR=('#C9C9C9', '#454545'))}
+ 'color': dict(BG=('#EEF2F0', '#0B0E0D'), PANEL=('#FFFFFF', '#161C1A'), PANEL2=('#E1E8E4', '#212A27'), LINE=('#B9C6BF', '#3C4A44'), LINE2=('#8FA097', '#5C6D66'),
+               INK=('#0B100E', '#F4F8F6'), MUT=('#3B4742', '#BEC9C4'),
+               ACC=('#0B7340', '#21EB98'), ACC_H=('#095F35', '#5CF5B6'), ON=('#FFFFFF', '#04261A'), BAD=('#B52F22', '#FF7A6B'), BAD_H=('#962519', '#FF9A8E'), WARN=('#8F5000', '#F7BA5E'),
+               WORK=('#0B7340', '#21EB98'), OFF=('#C2571A', '#F0924E'), UNR=('#9FADA6', '#5C6D66')),
+ 'gray': dict(BG=('#EDEDED', '#0E0E0E'), PANEL=('#FFFFFF', '#1A1A1A'), PANEL2=('#E0E0E0', '#262626'), LINE=('#BDBDBD', '#454545'), LINE2=('#8C8C8C', '#6A6A6A'),
+              INK=('#0F0F0F', '#F5F5F5'), MUT=('#474747', '#C2C2C2'),
+              ACC=('#1F1F1F', '#F0F0F0'), ACC_H=('#3A3A3A', '#FFFFFF'), ON=('#FAFAFA', '#0E0E0E'), BAD=('#1F1F1F', '#E6E6E6'), BAD_H=('#3A3A3A', '#FFFFFF'), WARN=('#4A4A4A', '#C8C8C8'),
+              WORK=('#1F1F1F', '#F0F0F0'), OFF=('#7A7A7A', '#9A9A9A'), UNR=('#B5B5B5', '#555555'))}
 C = dict(PAL['color'])
 def set_look(mode, tone):
     C.clear(); C.update(PAL['gray' if tone == 'gray' else 'color'])
@@ -263,14 +265,14 @@ def brand_icon(w):
 class Seg(ctk.CTkFrame):
     """Segmented control with readable text on the selected item in every look."""
     def __init__(self, parent, values, command=None, height=34, font_=None):
-        super().__init__(parent, fg_color=C['PANEL2'], corner_radius=999, height=height + 6); self.command = command; self.value = None; self.b = {}
+        super().__init__(parent, fg_color=C['PANEL2'], corner_radius=999, height=height + 6, border_width=1, border_color=C['LINE']); self.command = command; self.value = None; self.b = {}
         for i, v in enumerate(values):
             self.columnconfigure(i, weight=1, uniform='s')
             b = ctk.CTkButton(self, text=v, height=height - 2, corner_radius=999, font=font_ or font(13, True), border_width=0, command=lambda v=v: self.pick(v)); b.grid(row=0, column=i, sticky='ew', padx=3, pady=3); self.b[v] = b
     def set(self, v):
         self.value = v
         for k, b in self.b.items():
-            on = k == v; b.configure(fg_color=C['ACC'] if on else 'transparent', hover_color=C['ACC_H'] if on else C['LINE'], text_color=C['ON'] if on else C['INK'])
+            on = k == v; b.configure(fg_color=C['ACC'] if on else C['PANEL2'], hover_color=C['ACC_H'] if on else C['LINE'], text_color=C['ON'] if on else C['INK'])
     def get(self): return self.value
     def pick(self, v):
         self.set(v)
@@ -367,15 +369,15 @@ class UI:
     def lab(self, text, size=13, color='INK', bold=False, parent=None, **kw):
         return ctk.CTkLabel(parent or self.body, text=text, font=font(size, bold), text_color=C[color], anchor='w', justify='left', **kw)
     def entry(self, ph='', parent=None, **kw):
-        return ctk.CTkEntry(parent or self.body, placeholder_text=ph, height=kw.pop('height', 42), corner_radius=10, border_width=1, border_color=C['LINE'], fg_color=C['PANEL'], text_color=C['INK'],
+        return ctk.CTkEntry(parent or self.body, placeholder_text=ph, height=kw.pop('height', 42), corner_radius=10, border_width=2, border_color=C['LINE'], fg_color=C['PANEL'], text_color=C['INK'],
                             placeholder_text_color=C['MUT'], **{'font': font(13), **kw})
     def button(self, text, cmd, kind='acc', parent=None, **kw):
         c = {'acc': dict(fg_color=C['ACC'], hover_color=C['ACC_H'], text_color=C['ON']), 'bad': dict(fg_color=C['BAD'], hover_color=C['BAD_H'], text_color=C['ON']),
-             'ghost': dict(fg_color='transparent', hover_color=C['PANEL2'], text_color=C['INK'], border_width=1, border_color=C['LINE'])}[kind]
+             'ghost': dict(fg_color=C['PANEL'], hover_color=C['PANEL2'], text_color=C['INK'], border_width=2, border_color=C['LINE2'])}[kind]
         return ctk.CTkButton(parent or self.body, text=text, command=cmd, height=kw.pop('height', 44), corner_radius=999, font=font(14, True), **c, **kw)
     def switch(self, parent, text, var, sub=''):
         f = ctk.CTkFrame(parent, fg_color='transparent'); f.pack(fill='x', pady=5)
-        ctk.CTkSwitch(f, text='', variable=var, width=44, progress_color=C['ACC'], button_color=C['PANEL'] if ctk.get_appearance_mode() == 'Dark' else '#FFFFFF', button_hover_color=C['PANEL2'], fg_color=C['LINE']).pack(side='left', anchor='n', pady=2)
+        ctk.CTkSwitch(f, text='', variable=var, width=46, height=24, switch_width=46, switch_height=24, progress_color=C['ACC'], button_color=('#FFFFFF', '#F4F8F6'), button_hover_color=('#F0F0F0', '#FFFFFF'), fg_color=C['LINE2']).pack(side='left', anchor='n', pady=2)
         t = ctk.CTkFrame(f, fg_color='transparent'); t.pack(side='left', fill='x', expand=True, padx=(8, 0))
         self.lab(text, 13, bold=True, parent=t).pack(anchor='w')
         if sub: self.lab(sub, 11, 'MUT', parent=t, wraplength=320).pack(anchor='w')
@@ -427,7 +429,7 @@ class UI:
         self.sub = self.lab('', 12, 'MUT', parent=p); self.sub.pack(anchor='center')
         projs = e.projects(); self.proj_names = {x['name']: x['id'] for x in projs}
         self.lab('Project', 12, 'MUT', parent=p).pack(anchor='w', pady=(12, 4))
-        self.proj = ctk.CTkOptionMenu(p, values=list(self.proj_names) or ['No projects'], height=42, corner_radius=10, fg_color=C['PANEL'], button_color=C['PANEL'], button_hover_color=C['PANEL2'],
+        self.proj = ctk.CTkOptionMenu(p, values=list(self.proj_names) or ['No projects'], height=44, corner_radius=10, fg_color=C['PANEL2'], button_color=C['LINE'], button_hover_color=C['LINE2'],
                                       text_color=C['INK'], dropdown_fg_color=C['PANEL'], dropdown_text_color=C['INK'], dropdown_hover_color=C['PANEL2'], font=font(13), dropdown_font=font(13), dynamic_resizing=False, anchor='w')
         self.proj.pack(fill='x'); last = e.cfg.get('project'); self.proj.set(last if last in self.proj_names else (list(self.proj_names)[0] if self.proj_names else 'No projects'))
         self.btn = self.button('Start tracking', self.toggle, parent=p, height=52); self.btn.pack(fill='x', pady=(14, 0))
@@ -473,6 +475,7 @@ class UI:
         if not e.connected: msg, color = 'Local mode. Nothing leaves this computer.', 'MUT'
         elif not e.chain_ok: msg, color = 'The server flagged this device. Disconnect and connect again in Settings.', 'BAD'
         elif not e.online: msg, color = f'Offline. {e.store.unsent()} records are signed and waiting to sync.', 'WARN'
+        elif not s.get('allowed') and s.get('team_mode', 'off') != 'off' and not s.get('consent'): msg, color = 'Your team allows screenshots. None are taken until you agree in Privacy on the web panel.', 'MUT'
         elif not s.get('allowed'): msg, color = 'No screenshots are taken.', 'MUT'
         elif s.get('pause_until') and s['pause_until'] > time.time(): msg, color = f"Screenshots paused until {clock_of(s['pause_until'])}. Your admins can see the pause.", 'WARN'
         else: msg, color = f"Screenshots about every {s.get('interval', 10)} min" + (', blurred' if s.get('mode') == 'blur' else '') + f", kept {s.get('retention_days', 60)} days.", 'MUT'
@@ -530,7 +533,7 @@ class UI:
         u = self.eng.store.usage(a, b, self.eng.rules, tzmin())
         tiles = ctk.CTkFrame(p, fg_color='transparent'); tiles.pack(fill='x', pady=(10, 0)); tiles.columnconfigure((0, 1, 2), weight=1, uniform='t')
         for i, (v, l) in enumerate(((hm(u['secs']), 'Tracked'), ('-' if u['prod'] is None else f"{u['prod']}%", 'Work-related'), (f"{u['activity']}%", 'Activity'))):
-            f = ctk.CTkFrame(tiles, fg_color=C['PANEL'], corner_radius=14, border_width=1, border_color=C['LINE']); f.grid(row=0, column=i, sticky='ew', padx=(0 if i == 0 else 4, 0 if i == 2 else 4))
+            f = ctk.CTkFrame(tiles, fg_color=C['PANEL'], corner_radius=14, border_width=1, border_color=C['LINE2']); f.grid(row=0, column=i, sticky='ew', padx=(0 if i == 0 else 4, 0 if i == 2 else 4))
             ctk.CTkLabel(f, text=v, font=mono(16, True), text_color=C['INK']).pack(pady=(10, 0)); ctk.CTkLabel(f, text=l, font=font(11), text_color=C['MUT']).pack(pady=(0, 10))
         cv = tk.Canvas(p, height=170, highlightthickness=0, bd=0, bg=col('BG')); cv.pack(fill='x', pady=(12, 0))
         cv.update_idletasks(); self.chart(cv, u, a, b, kind)

@@ -1,0 +1,16 @@
+{
+  "packageId": "com.qudslab.trueduty",
+  "host": "YOUR-SERVER.example.com",
+  "name": "TrueDuty",
+  "launcherName": "TrueDuty",
+  "display": "standalone",
+  "themeColor": "#21EB98",
+  "backgroundColor": "#0A0C0B",
+  "startUrl": "/m",
+  "iconUrl": "https://YOUR-SERVER.example.com/static/img/icon-512.png",
+  "maskableIconUrl": "https://YOUR-SERVER.example.com/static/img/icon-512.png",
+  "appVersion": "2.0.0",
+  "appVersionCode": 1,
+  "enableNotifications": false,
+  "fallbackType": "customtabs"
+}

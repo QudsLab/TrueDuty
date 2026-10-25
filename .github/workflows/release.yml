@@ -1,0 +1,71 @@
+# Builds TrueDuty for Windows, macOS and Linux on every push to main and publishes a GitHub release.
+# TaskDash reads these releases for its download page, so nothing else has to be updated by hand.
+name: release
+on:
+  push:
+    branches: [main, master]
+    paths: ['app/**', '.github/workflows/release.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: { group: release, cancel-in-progress: false }
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs: { v: '${{ steps.v.outputs.v }}' }
+    steps:
+      - id: v
+        run: echo "v=2.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, plat: windows-x64, file: TrueDuty.exe, ext: .exe }
+          - { os: macos-14,       plat: macos-arm64, file: TrueDuty.app, ext: .zip }
+          - { os: macos-13,       plat: macos-x64,   file: TrueDuty.app, ext: .zip }
+          - { os: ubuntu-22.04,   plat: linux-x64,   file: TrueDuty.bin, ext: '' }
+    runs-on: ${{ matrix.os }}
+    env:
+      TD_VERSION: ${{ needs.version.outputs.v }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip, cache-dependency-path: app/requirements.txt }
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk patchelf ccache libxss1
+      - name: Python packages
+        run: python -m pip install -r app/requirements.txt
+      - name: Stamp version
+        shell: bash
+        run: sed -i.bak "s/^APP = 'TrueDuty'; VERSION = '[^']*'/APP = 'TrueDuty'; VERSION = '${TD_VERSION}'/" app/main.py && rm -f app/main.py.bak
+      - name: Build
+        working-directory: app
+        run: python build.py
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p out; name="TrueDuty-${TD_VERSION}-${{ matrix.plat }}${{ matrix.ext }}"
+          if [ "${{ matrix.ext }}" = ".zip" ]; then (cd app/dist && ditto -c -k --keepParent "${{ matrix.file }}" "../../out/$name");
+          else src="app/dist/${{ matrix.file }}"; [ -f "$src" ] || src="app/dist/TrueDuty"; cp "$src" "out/$name"; fi
+          cd out && (sha256sum "$name" 2>/dev/null || shasum -a 256 "$name") > "$name.sha256"
+      - uses: actions/upload-artifact@v4
+        with: { name: '${{ matrix.plat }}', path: out/* }
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.version.outputs.v }}
+        run: |
+          msg=$(printf '%s\n\nCommit %s' "${{ github.event.head_commit.message }}" "${GITHUB_SHA::7}" | head -c 1800)
+          gh release create "v$V" out/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "TrueDuty $V" --notes "$msg"

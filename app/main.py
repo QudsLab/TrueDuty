@@ -8,7 +8,7 @@ from net import Client, NetError, KeyChanged, pretty_fp
 from store import Store
 import tracker
 
-APP = 'TrueDuty'; VERSION = '2.0.0'  # CI replaces this with the release number
+APP = 'TrueDuty'; VERSION = '0.0.1'  # CI replaces this with the release number
 OS = platform.system()
 HERE = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, 'frozen', False) else __file__))
 ASSETS = os.path.join(HERE, 'assets')

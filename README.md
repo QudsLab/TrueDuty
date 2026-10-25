@@ -135,7 +135,7 @@ The device key and token are wrapped with Windows DPAPI on Windows. On macOS and
 
 ## Releases and signing
 
-`.github/workflows/release.yml` runs on every push to `main` (release `v2.0.<run>`), on tags `v*` (release with that version) and by hand. It builds six targets (Windows x64/ARM64, macOS arm64/x64, Linux x64/ARM64), signs, packages, checksums, attests, optionally scans with VirusTotal and publishes. If one target fails the others are still published. Packaging scripts are in `app/packaging/`, signing setup in [docs/code-signing.md](docs/code-signing.md).
+`.github/workflows/release.yml` runs on every push to `main` and publishes release `v<VERSION>`, where VERSION is the one-line `VERSION` file at the repo root (now 0.0.1). Pushing again without changing it rebuilds and replaces that release; edit `VERSION` to cut a new one. Tags `v*` and manual runs work too. It builds six targets (Windows x64/ARM64, macOS arm64/x64, Linux x64/ARM64), signs, packages, checksums, attests, optionally scans with VirusTotal and publishes. If one target fails the others are still published. Packaging scripts are in `app/packaging/`, signing setup in [docs/code-signing.md](docs/code-signing.md).
 
 Local build: `cd app && python build.py` (output in `app/dist/`).
 

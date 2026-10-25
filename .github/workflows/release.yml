@@ -2,7 +2,9 @@
 #   Windows x64 and ARM64   .msi installer + Setup .exe installer + portable .zip
 #   macOS Apple silicon and Intel   .dmg + .pkg installer + portable .zip
 #   Linux x64 and ARM64     .deb + .rpm installers, .AppImage, portable .tar.gz
-# Triggers: push to main/master -> v2.0.<run>, tag v1.2.3 -> v1.2.3, or Run workflow by hand.
+# Version: the VERSION file at the repo root (e.g. 0.0.1). Push to main/master builds and publishes release v<VERSION>;
+#   pushing again without changing VERSION rebuilds and replaces that release. Bump VERSION for a new release.
+#   A tag v1.2.3 publishes 1.2.3. Run workflow by hand works too.
 #
 # Antivirus and trust (details in docs/code-signing.md):
 #   - Builds are Nuitka standalone folders, never one-file self extractors (the main false positive trigger).
@@ -31,12 +33,14 @@ concurrency:
 
 jobs:
   version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs: { v: '${{ steps.v.outputs.v }}' }
     steps:
+      - uses: actions/checkout@v5
       - id: v
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF#refs/tags/v}"; else v="2.0.${{ github.run_number }}"; fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF#refs/tags/v}"; else v="$(tr -d ' \r\n' < VERSION)"; fi
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]] || { echo "::error::VERSION must look like 1.2.3, got '$v'"; exit 1; }
           echo "v=$v" >> "$GITHUB_OUTPUT"
 
   build:
@@ -59,18 +63,24 @@ jobs:
       HAS_AZURE: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
       HAS_PFX: ${{ secrets.WIN_CERT_PFX_BASE64 != '' }}
       HAS_GPG: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+      HAS_MAC: ${{ secrets.MAC_CERT_P12_BASE64 != '' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: { python-version: '3.12', cache: pip, cache-dependency-path: app/requirements.txt }
       - name: System packages (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y python3-tk patchelf ccache libxss1 rpm file
       - name: Python packages
-        run: python -m pip install -r app/requirements.txt imageio zstandard ordered-set
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --prefer-binary -r app/requirements.txt
+          # imageio turns the PNG icon into the macOS .icns; Windows uses icon.ico and Linux needs none
+          if [ "$RUNNER_OS" = macOS ]; then python -m pip install --prefer-binary imageio; fi
       - name: Stamp version
         shell: bash
-        run: sed -i.bak "s/^APP = 'TrueDuty'; VERSION = '[^']*'/APP = 'TrueDuty'; VERSION = '${TD_VERSION}'/" app/main.py && rm -f app/main.py.bak
+        run: sed -i.bak "s/^APP = 'TrueDuty'; VERSION = '[^']*'/APP = 'TrueDuty'; VERSION = '${TD_VERSION}'/" app/main.py && rm -f app/main.py.bak && grep -n "^APP = " app/main.py
       - name: Build
         working-directory: app
         run: python build.py
@@ -80,7 +90,7 @@ jobs:
       - name: SignPath upload (program files)
         if: runner.os == 'Windows' && env.HAS_SIGNPATH == 'true'
         id: sp1
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with: { name: 'unsigned-files-${{ matrix.arch }}', path: app/dist/TrueDuty }
       - name: SignPath sign (program files)
         if: runner.os == 'Windows' && env.HAS_SIGNPATH == 'true'
@@ -117,7 +127,7 @@ jobs:
         run: ./app/packaging/sign-pfx.ps1 app/dist/TrueDuty
       - name: .NET for the WiX MSI builder (Windows)
         if: runner.os == 'Windows'
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with: { dotnet-version: '8.0.x' }
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -126,7 +136,7 @@ jobs:
       - name: SignPath upload (installer)
         if: runner.os == 'Windows' && env.HAS_SIGNPATH == 'true'
         id: sp2
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: 'unsigned-setup-${{ matrix.arch }}'
           path: |
@@ -171,7 +181,7 @@ jobs:
 
       # ---------------- macOS ----------------
       - name: Import Apple certificates
-        if: runner.os == 'macOS' && env.MAC_CERT_P12_BASE64 != ''
+        if: runner.os == 'macOS' && env.HAS_MAC == 'true'
         env: { MAC_CERT_P12_BASE64: '${{ secrets.MAC_CERT_P12_BASE64 }}', MAC_CERT_PASSWORD: '${{ secrets.MAC_CERT_PASSWORD }}' }
         run: |
           kc=$RUNNER_TEMP/build.keychain; security create-keychain -p ci "$kc"; security set-keychain-settings "$kc"; security unlock-keychain -p ci "$kc"
@@ -205,19 +215,19 @@ jobs:
         shell: bash
         run: cd out && for f in *; do case "$f" in *.asc|*.sha256) ;; *) (sha256sum "$f" 2>/dev/null || shasum -a 256 "$f") > "$f.sha256";; esac; done; ls -la
       - name: Build provenance (Sigstore)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v3
         with: { subject-path: 'out/*' }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with: { name: '${{ matrix.plat }}-${{ matrix.arch }}', path: out/* }
 
   publish:
     needs: [version, build]
     if: ${{ !cancelled() && needs.version.result == 'success' }}   # publish what was built even if one system failed
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       HAS_VT: ${{ secrets.VIRUSTOTAL_API_KEY != '' }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with: { path: out, merge-multiple: true, pattern: '{windows,macos,linux}-*' }
       - name: VirusTotal scan
         if: env.HAS_VT == 'true'

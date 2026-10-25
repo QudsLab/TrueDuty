@@ -9,7 +9,7 @@ Packaging (installer, portable zip, deb, rpm, AppImage, dmg, pkg) and code signi
 .github/workflows/release.yml and docs/code-signing.md."""
 import os, sys, glob, shutil, platform, subprocess, importlib.util
 HERE = os.path.dirname(os.path.abspath(__file__)); OS = platform.system(); OUT = os.path.join(HERE, 'dist')
-VERSION = os.environ.get('TD_VERSION') or '2.0.0'
+VERSION = os.environ.get('TD_VERSION') or open(os.path.join(HERE, '..', 'VERSION')).read().strip()
 NUM = '.'.join((VERSION.split('-')[0].split('.') + ['0', '0', '0', '0'])[:4])     # Windows wants a.b.c.d
 def run(cmd):
     print('>', ' '.join(map(str, cmd)), flush=True); subprocess.check_call(cmd)

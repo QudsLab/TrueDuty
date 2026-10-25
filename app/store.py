@@ -10,6 +10,7 @@ SCHEMA = '''
 CREATE TABLE IF NOT EXISTS entries(uid TEXT PRIMARY KEY, project_id INTEGER, project TEXT, start INTEGER, stop INTEGER, running INTEGER DEFAULT 0, src TEXT DEFAULT 'app', team TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS ix_entries_start ON entries(start);
 CREATE TABLE IF NOT EXISTS activity(id INTEGER PRIMARY KEY, entry_uid TEXT, ts INTEGER, k INTEGER, m INTEGER, app TEXT, title TEXT, UNIQUE(entry_uid, ts));
+-- newer columns (c, s, mv, d, act_s, idle) are added in Store.__init__ so old databases keep working
 CREATE INDEX IF NOT EXISTS ix_activity_ts ON activity(ts);
 CREATE TABLE IF NOT EXISTS breaks(uid TEXT PRIMARY KEY, start INTEGER, stop INTEGER, running INTEGER DEFAULT 0, reason TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS gaps(uid TEXT PRIMARY KEY, start INTEGER, stop INTEGER, status TEXT DEFAULT 'open', created INTEGER);
@@ -25,6 +26,9 @@ class Store:
         self.path = path; self.lock = threading.RLock()
         self.db = sqlite3.connect(path, check_same_thread=False, timeout=20); self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA journal_mode=WAL'); self.db.executescript(SCHEMA)
+        have = {r[1] for r in self.db.execute('PRAGMA table_info(activity)')}
+        for col in ('c', 's', 'mv', 'd', 'act_s', 'idle'):           # clicks, scroll, pointer moves, distance px, seconds with input, idle flag
+            if col not in have: self.db.execute(f'ALTER TABLE activity ADD COLUMN {col} INTEGER DEFAULT 0')
         if not self.db.execute('SELECT COUNT(*) FROM projects').fetchone()[0]: self.db.execute("INSERT INTO projects(name) VALUES('General')")
         self.db.commit(); self.device = None; self.key = None
     def q(self, sql, *a):
@@ -55,8 +59,10 @@ class Store:
         return [{'seq': r['seq'], 'kind': r['kind'], 'd': json.loads(r['data']), 'prev': r['prev'], 'mac': r['mac']}
                 for r in self.q('SELECT * FROM outbox WHERE device=? AND sent=0 ORDER BY seq LIMIT ?', self.device, n)]
     def acked(self, seq):
-        if self.device: self.ex('UPDATE outbox SET sent=1 WHERE device=? AND seq<=?', self.device, int(seq))
-        if self.device and int(seq) > 0: self.ex('DELETE FROM outbox WHERE device=? AND sent=1 AND seq<?', self.device, int(seq) - 50)
+        """Only the server's reply marks records as delivered. Delivered records are trimmed later; unsent ones are never removed."""
+        if not self.device or int(seq) <= 0: return
+        self.ex('UPDATE outbox SET sent=1 WHERE device=? AND seq<=? AND sent=0', self.device, int(seq))
+        self.ex('DELETE FROM outbox WHERE device=? AND sent=1 AND seq<?', self.device, int(seq) - 50)
     def unsent(self):
         if not self.device: return 0
         return self.q1('SELECT COUNT(*) c FROM outbox WHERE device=? AND sent=0', self.device)['c']
@@ -85,13 +91,15 @@ class Store:
         self.ex("UPDATE gaps SET status='filled' WHERE uid=?", gap)
         self.log('entry', {'u': uid, 'p': project_id, 's': g['start'], 'e': stop, 'r': 0, 'src': 'gap', 'g': gap})
     def running(self): return self.q1('SELECT * FROM entries WHERE running=1 ORDER BY start DESC LIMIT 1')
-    def add_minute(self, entry_uid, ts, k, m, app, title):
-        ts = int(ts) - int(ts) % 60
-        try: self.ex('INSERT INTO activity(entry_uid,ts,k,m,app,title) VALUES(?,?,?,?,?,?)', entry_uid, ts, int(k), int(m), app or '', title or '')
+    def add_minute(self, entry_uid, ts, n, app, title):
+        """n: counts from InputMonitor.take(): k keys, c clicks, s scroll, mv pointer moves, d distance px, m all pointer events, as active seconds."""
+        ts = int(ts) - int(ts) % 60; v = {k: max(0, int(n.get(k, 0))) for k in ('k', 'm', 'c', 's', 'mv', 'd', 'as')}
+        try: self.ex('INSERT INTO activity(entry_uid,ts,k,m,c,s,mv,d,act_s,app,title) VALUES(?,?,?,?,?,?,?,?,?,?,?)', entry_uid, ts, v['k'], v['m'], v['c'], v['s'], v['mv'], v['d'], v['as'], app or '', title or '')
         except sqlite3.IntegrityError: return
-        self.log('act', {'u': entry_uid, 't': ts, 'k': int(k), 'm': int(m), 'a': app or '', 'ti': title or ''})
+        self.log('act', dict(v, u=entry_uid, t=ts, a=app or '', ti=title or ''))
     def cut_activity(self, entry_uid, after):
-        self.ex('DELETE FROM activity WHERE entry_uid=? AND ts>=?', entry_uid, int(after))
+        """Idle minutes are only marked, never deleted, so nothing recorded is lost before the server has it."""
+        self.ex('UPDATE activity SET idle=1 WHERE entry_uid=? AND ts>=?', entry_uid, int(after))
     def start_break(self, reason=''):
         uid = new_uid(); t = int(time.time())
         self.ex('INSERT INTO breaks(uid,start,stop,running,reason) VALUES(?,?,?,1,?)', uid, t, t, reason)
@@ -126,15 +134,15 @@ class Store:
         r = self.q1('SELECT COALESCE(SUM(MIN(stop,?)-MAX(start,?)),0) s FROM breaks WHERE stop>?', int(time.time()) + 1, a, a); return max(0, int(r['s']))
     def usage(self, a, b, rules=(), tzm=0):
         """Same numbers the server shows: tracked time, work, not work, unrated, categories, apps, days, hours."""
-        rules = list(rules or []); act = self.q('SELECT ts,k,m,app,title FROM activity WHERE ts>=? AND ts<? ORDER BY ts', a, b)
-        tot = {'work': 0, 'off': 0, 'new': 0}; apps = {}; cats = {}; days = {}; hours = [{'work': 0, 'off': 0, 'new': 0} for _ in range(24)]; active = 0; cache = {}
+        rules = list(rules or []); act = self.q('SELECT ts,k,m,act_s,app,title FROM activity WHERE ts>=? AND ts<? AND idle=0 ORDER BY ts', a, b)
+        tot = {'work': 0, 'off': 0, 'new': 0}; apps = {}; cats = {}; days = {}; hours = [{'work': 0, 'off': 0, 'new': 0} for _ in range(24)]; active = 0.0; cache = {}
         dk = lambda ts: time.strftime('%Y-%m-%d', time.gmtime(ts + tzm * 60))
         for r in act:
             key = (r['app'], r['title'])
             if key not in cache: cache[key] = classify(rules, r['app'], r['title'])
             cls, cat = cache[key]; app = clean_app(r['app']) or 'Unknown'
             tot[cls] += 60
-            if r['k'] + r['m'] > 0: active += 1
+            active += (r['act_s'] or 0) / 60 if r['act_s'] else (1 if r['k'] + r['m'] > 0 else 0)
             hours[((r['ts'] + tzm * 60) // 3600) % 24][cls] += 60
             apps.setdefault(app, {'app': app, 'secs': 0})['secs'] += 60
             cats.setdefault(cat, {'category': cat, 'secs': 0})['secs'] += 60

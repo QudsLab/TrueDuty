@@ -4,31 +4,46 @@ import io, os, sys, time, shutil, subprocess, threading, platform
 OS = platform.system()
 
 class InputMonitor:
-    """Counts key presses / mouse events only (never which keys). Falls back to pointer polling."""
+    """Counts input per minute, never which keys: key presses, clicks, scroll steps, pointer moves, pointer distance in
+    pixels, and the number of seconds that had any input (0..60). Falls back to pointer polling when pynput is missing."""
+    FIELDS = ('k', 'c', 's', 'mv', 'd')
     def __init__(self, tk_root=None):
-        self.keys = 0; self.mouse = 0; self.last = time.time(); self.ok = False; self.root = tk_root; self._lk = threading.Lock(); self._pos = None
+        self.n = dict.fromkeys(self.FIELDS, 0); self.secs = set(); self.last = time.time(); self.ok = False; self.root = tk_root
+        self._lk = threading.Lock(); self._pos = None; self._xy = None
         try:
             from pynput import keyboard, mouse
-            self._kl = keyboard.Listener(on_press=self._k); self._ml = mouse.Listener(on_move=self._m, on_click=self._m, on_scroll=self._m)
+            self._kl = keyboard.Listener(on_press=self._k)
+            self._ml = mouse.Listener(on_move=self._mv, on_click=self._c, on_scroll=self._s)
             self._kl.daemon = self._ml.daemon = True; self._kl.start(); self._ml.start(); self.ok = True
         except Exception:
             self.ok = False
-    def _k(self, *a):
-        with self._lk: self.keys += 1; self.last = time.time()
-    def _m(self, *a):
-        with self._lk: self.mouse += 1; self.last = time.time()
+    def _hit(self, f, inc=1):
+        t = time.time()
+        with self._lk: self.n[f] += inc; self.last = t; self.secs.add(int(t))
+    def _k(self, *a): self._hit('k')
+    def _c(self, x, y, button, pressed):
+        if pressed: self._hit('c')
+    def _s(self, *a): self._hit('s')
+    def _mv(self, x, y):
+        with self._lk:
+            if self._xy is not None: self.n['d'] += int(abs(x - self._xy[0]) + abs(y - self._xy[1]))
+            self._xy = (x, y)
+        self._hit('mv')
     def poll_pointer(self):
         """Fallback (no pynput, e.g. Wayland): detect pointer movement via Tk."""
         if self.ok or not self.root: return
         try:
             p = self.root.winfo_pointerxy()
             if self._pos is not None and p != self._pos:
-                with self._lk: self.mouse += 1; self.last = time.time()
+                with self._lk: self.n['d'] += abs(p[0] - self._pos[0]) + abs(p[1] - self._pos[1])
+                self._hit('mv')
             self._pos = p
         except Exception: pass
     def take(self):
+        """-> counts since the last take: {'k','c','s','mv','d','m','as'}; m = all pointer events (older servers), as = active seconds."""
         with self._lk:
-            k, m = self.keys, self.mouse; self.keys = self.mouse = 0; return k, m
+            r = dict(self.n); r['m'] = r['c'] + r['s'] + r['mv']; r['as'] = min(60, len(self.secs))
+            self.n = dict.fromkeys(self.FIELDS, 0); self.secs = set(); return r
     def idle_secs(self): return time.time() - self.last
 
 def active_window():

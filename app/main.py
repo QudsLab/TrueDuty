@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TrueDuty desktop tracker (Windows / Linux / macOS). Works on its own; connects to a TaskDash team when you want.
 Run: python main.py"""
-import os, sys, json, time, base64, random, queue, platform, threading, collections, webbrowser, calendar, re
+import os, sys, json, time, base64, random, queue, platform, threading, collections, webbrowser, calendar, re, socket, secrets, http.server, urllib.parse
 import tkinter as tk
 import customtkinter as ctk
 from net import Client, NetError, KeyChanged, pretty_fp
@@ -69,8 +69,8 @@ class Engine:
         self.online = False; self.act = collections.deque(maxlen=120); self.last_min = 0; self.next_shot = 0; self.win_start = 0
         self.policy = dict(LOCAL_POLICY, **(self.cfg.get('policy') or {})); self.rules = self.cfg.get('rules') or []
         self.idle_gap = None; self.auto_resume = False; self.chain_ok = True; self.last_sync = 0; self.last_reason = ''; self.today_server = None
-        self.last_shot = 0; self.last_pause_note = 0
-        self.attach()
+        self.last_shot = 0; self.last_pause_note = 0; self.wake = threading.Event(); self.sync_lock = threading.Lock()
+        self.attach(); threading.Thread(target=self.sync_worker, daemon=True).start()
     # ---- connection state ----
     @property
     def connected(self): return bool(self.cfg.get('token') and self.cfg.get('server'))
@@ -95,20 +95,54 @@ class Engine:
     def login(self, body):
         with self.lock: r = self.client.call('/connect', dict(body, name=platform.node() or 'computer', platform=platform.system()), None)
         self.finish(r)
-    def google_begin(self):
-        with self.lock: return self.client.call('/connect/begin', {'name': platform.node() or 'computer', 'platform': platform.system()}, None)
-    def google_poll(self, nonce):
-        with self.lock: r = self.client.call('/connect/poll', {'nonce': nonce}, None)
-        if r.get('pending'): return False
-        self.finish(r); return True
+    def browser_begin(self):
+        """Browser sign-in. A one-shot web server listens on 127.0.0.1 only. The person signs in on the website (Google or
+        e-mail and password) and approves; the website sends the browser to http://127.0.0.1:<port>/callback with a one-time
+        grant and our state. The grant is then checked by the server over the encrypted channel before anything is saved."""
+        state = secrets.token_urlsafe(18); got = {}; ev = threading.Event()
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def do_GET(self):
+                u = urllib.parse.urlparse(self.path); q = urllib.parse.parse_qs(u.query)
+                ok = u.path == '/callback' and q.get('state', [''])[0] == state and q.get('grant')
+                if ok and not ev.is_set(): got['grant'] = q['grant'][0]; ev.set()
+                body = ('<!doctype html><meta charset="utf-8"><title>TrueDuty</title><body style="font:16px system-ui;background:#0b0e0d;color:#f4f8f6;display:grid;place-items:center;height:90vh">'
+                        '<div style="text-align:center"><h2>' + ('TrueDuty is finishing sign-in' if ok else 'This link is not for this app') + '</h2><p style="color:#bec9c4">'
+                        + ('You can close this tab and go back to the app.' if ok else 'Start again from TrueDuty.') + '</p></div>').encode()
+                self.send_response(200 if ok else 400); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'no-store'); self.end_headers(); self.wfile.write(body)
+        srv = http.server.HTTPServer(('127.0.0.1', 0), H); srv.timeout = 1
+        def serve():
+            while not ev.is_set() and not getattr(srv, 'done', False): srv.handle_request()
+        threading.Thread(target=serve, daemon=True).start()
+        with self.lock: r = self.client.call('/connect/begin', {'name': platform.node() or 'computer', 'platform': platform.system(), 'port': srv.server_address[1], 'state': state}, None)
+        r.update(_srv=srv, _ev=ev, _got=got); return r
+    def browser_wait(self, r, give_up):
+        """Wait for the local callback (or, if the browser could not reach it, for the approval by polling). -> True when connected."""
+        t0 = time.time(); last_poll = 0
+        try:
+            while time.time() - t0 < r.get('expires', 600) and not give_up():
+                if r['_ev'].wait(1):
+                    with self.lock: res = self.client.call('/connect/grant', {'nonce': r['nonce'], 'grant': r['_got']['grant']}, None)
+                    self.finish(res); return True
+                if time.time() - last_poll > 6:
+                    last_poll = time.time()
+                    with self.lock: res = self.client.call('/connect/poll', {'nonce': r['nonce']}, None)
+                    if not res.get('pending'): self.finish(res); return True
+            return False
+        finally:
+            r['_srv'].done = True
+            try: r['_srv'].server_close()
+            except Exception: pass
     def finish(self, r):
         if self.running(): self.stop('stopped')
         self.cfg.update(server=self.cfg.pop('pending_server'), pin=self.cfg.pop('pending_pin'), token=protect(r['token'].encode()),
                         device_key=protect(bytes.fromhex(r['device_key'])), device_id=str(r['device_id']), user=r['name'], email=r['email'])
+        if r.get('team'): self.cfg['team'] = r['team']
         save_cfg(self.cfg); self.attach(); self.refresh()
     def disconnect(self):
         try:
-            if self.connected: self.call('/logout')
+            if self.connected: self.sync(); self.call('/logout')
         except Exception: pass
         if self.running(): self.stop('stopped')
         for k in ('token', 'device_key', 'device_id', 'pin', 'user', 'team', 'policy', 'rules', 'projects', 'role'): self.cfg.pop(k, None)
@@ -124,8 +158,29 @@ class Engine:
         if e: return {'state': 'working', 'project_id': e['project_id'], 'since': e['start']}
         if b: return {'state': 'break', 'since': b['start']}
         return {'state': '', 'reason': self.last_reason}
+    def reachable(self):
+        """Cheap check before syncing: can a TCP connection to the server be opened? No data is sent."""
+        try:
+            u = urllib.parse.urlparse(self.cfg.get('server', '')); host = u.hostname
+            if not host: return False
+            with socket.create_connection((host, u.port or (443 if u.scheme == 'https' else 80)), timeout=4): return True
+        except OSError: return False
+    def kick(self): self.wake.set()
+    def sync_worker(self):
+        """Uploads in the background. With no network it keeps everything on this computer and checks again every 15 s
+        (backing off to 2 minutes); as soon as the server answers, the waiting records go up. Nothing is dropped meanwhile."""
+        wait = 15
+        while not self.stop_flag:
+            self.wake.wait(30 if self.online else wait); self.wake.clear()
+            if self.stop_flag or not self.connected: continue
+            if not self.reachable():
+                if self.online: self.online = False; self.ev('tick', None)
+                wait = min(120, wait * 2); continue
+            wait = 15; self.sync()
     def sync(self):
         if not self.connected: return
+        with self.sync_lock: self._sync()
+    def _sync(self):
         try:
             for _ in range(10):
                 log = self.store.pending(400)
@@ -152,20 +207,20 @@ class Engine:
     def start(self, project_id, project):
         self.store.stop_break(); self.auto_resume = False; self.idle_gap = None
         self.store.start_entry(project_id, project, team=self.cfg.get('team', '') if self.connected else '')
-        self._arm(); self.last_reason = ''; self.ev('state', None); threading.Thread(target=self.sync, daemon=True).start()
+        self._arm(); self.last_reason = ''; self.ev('state', None); self.kick()
     def stop(self, reason='stopped', at=None):
         e = self.running()
         if not e: return
         self.store.touch_entry(e['uid'], at or time.time(), running=False); self.last_reason = reason; self.auto_resume = False
-        self.ev('state', None); threading.Thread(target=self.sync, daemon=True).start()
+        self.ev('state', None); self.kick()
     def break_start(self):
         e = self.running()
         if e: self.store.touch_entry(e['uid'], time.time(), running=False)
-        self.store.start_break(); self.last_reason = 'break'; self.ev('state', None); threading.Thread(target=self.sync, daemon=True).start()
+        self.store.start_break(); self.last_reason = 'break'; self.ev('state', None); self.kick()
     def break_stop(self, resume=None):
         self.store.stop_break()
         if resume: self.start(*resume)
-        else: self.ev('state', None); threading.Thread(target=self.sync, daemon=True).start()
+        else: self.ev('state', None); self.kick()
     def _plan_shot(self):
         iv = max(1, int(self.policy['shots'].get('interval') or 10)) * 60; self.next_shot = self.win_start + random.uniform(0.1, 0.9) * iv
     def shots_on(self):
@@ -173,7 +228,7 @@ class Engine:
     def take_shot(self):
         try:
             mode = self.policy['shots'].get('mode', 'on'); jpg = tracker.screenshot_jpeg(blur=(mode == 'blur'))
-            iv = max(1, int(self.policy['shots'].get('interval') or 10)); act = list(self.act)[-iv:]; pct = round(100 * sum(1 for a in act if a) / len(act)) if act else 0
+            iv = max(1, int(self.policy['shots'].get('interval') or 10)); act = list(self.act)[-iv:]; pct = round(100 * sum(act) / len(act)) if act else 0
             body = {'jpg': base64.b64encode(jpg).decode(), 'pct': pct}
             try: self.call('/shot', body, endpoint=self.cfg.get('upload', '/sec/msg'))
             except NetError as e:
@@ -191,9 +246,9 @@ class Engine:
         self.store.touch_entry(e['uid'], credit, running=False); self.store.cut_activity(e['uid'], credit)
         now = time.time(); gap = self.store.add_gap(credit, now) if now - credit >= 60 else None
         self.idle_gap = gap; self.auto_resume = pol == 'auto'; self.last_reason = 'idle'
-        self.ev('idle', {'policy': pol, 'mins': int((now - last) // 60), 'gap': gap}); threading.Thread(target=self.sync, daemon=True).start()
-    def fill_gap(self, uid, project_id, project): self.store.add_gap_entry(uid, project_id, project); self.ev('gaps', None); threading.Thread(target=self.sync, daemon=True).start()
-    def dismiss_gap(self, uid): self.store.dismiss_gap(uid); self.ev('gaps', None); threading.Thread(target=self.sync, daemon=True).start()
+        self.ev('idle', {'policy': pol, 'mins': int((now - last) // 60), 'gap': gap}); self.kick()
+    def fill_gap(self, uid, project_id, project): self.store.add_gap_entry(uid, project_id, project); self.ev('gaps', None); self.kick()
+    def dismiss_gap(self, uid): self.store.dismiss_gap(uid); self.ev('gaps', None); self.kick()
     def change_password(self, old, new): self.call('/password', {'old': old, 'code': old, 'new': new})
     def loop(self):
         tick = 0
@@ -209,15 +264,13 @@ class Engine:
                             g = self.idle_gap; self.idle_gap = None; self.start(self.cfg['project_id'], self.cfg.get('project', '')); self.ev('resumed', g)
                         else: self.idle_gap = None
                     if self.store.on_break() and tick % 30 == 0: self.store.touch_break()
-                    if tick % 30 == 0 and self.connected: self.sync()
                     continue
                 if not self.inp: self._arm()
                 if int(now // 60) * 60 != self.last_min:                                # minute boundary: store the finished minute
-                    k, m = self.inp.take(); app, title = tracker.active_window()
+                    n = self.inp.take(); app, title = tracker.active_window()
                     if not self.cfg.get('titles', True): title = ''
-                    self.store.add_minute(e['uid'], self.last_min, k, m, app, title); self.act.append(1 if k + m > 0 else 0)
+                    self.store.add_minute(e['uid'], self.last_min, n, app, title); self.act.append(round(n['as'] / 60, 2) if n['as'] else (1 if n['k'] + n['m'] else 0))
                     self.last_min = int(now // 60) * 60; self.store.touch_entry(e['uid'], now, True, log=(tick % 300 < 60)); self.ev('activity', list(self.act)[-10:])
-                if tick % 30 == 0 and self.connected: self.sync()
                 lim = int(self.policy.get('idle_max') or 0) * 60
                 if lim and self.inp.idle_secs() > lim: self.go_idle(); continue
                 s = self.policy['shots']
@@ -466,7 +519,7 @@ class UI:
         if not self.alive(c): return
         c.delete('all'); w = max(c.winfo_width(), 410); n = 10; gap = 5; bw = (w - gap * (n - 1)) / n; data = ([0] * n + self.act)[-n:]
         for i, v in enumerate(data):
-            x = i * (bw + gap); c.create_rectangle(x, 4 if v else 22, x + bw, 26, fill=col('ACC') if v else col('LINE'), width=0)
+            x = i * (bw + gap); c.create_rectangle(x, 26 - max(4, 22 * min(1, v)) if v else 22, x + bw, 26, fill=col('ACC') if v else col('LINE'), width=0)
     def state_ui(self):
         e = self.eng
         if not self.alive(self.btn): return
@@ -478,7 +531,7 @@ class UI:
         s = e.policy['shots']
         if not e.connected: msg, color = 'Local mode. Nothing leaves this computer.', 'MUT'
         elif not e.chain_ok: msg, color = 'The server flagged this device. Disconnect and connect again in Settings.', 'BAD'
-        elif not e.online: msg, color = f'Offline. {e.store.unsent()} records are signed and waiting to sync.', 'WARN'
+        elif not e.online: msg, color = f'No network. {e.store.unsent()} records are saved here and go up when the connection is back.', 'WARN'
         elif not s.get('allowed') and s.get('team_mode', 'off') != 'off' and not s.get('consent'): msg, color = 'Your team allows screenshots. None are taken until you agree in Privacy on the web panel.', 'MUT'
         elif not s.get('allowed'): msg, color = 'No screenshots are taken.', 'MUT'
         elif s.get('pause_until') and s['pause_until'] > time.time(): msg, color = f"Screenshots paused until {clock_of(s['pause_until'])}. Your admins can see the pause.", 'WARN'
@@ -708,15 +761,16 @@ class UI:
             self.bg(lambda: self.eng.change_password(o, n1), done); return False
         Dialog(self, 'Change password', 'The server checks your current password first.', buttons=(('Cancel', 'ghost', None), ('Change', 'acc', go)), body=body, width=440)
     def ask_disconnect(self):
-        self.confirm('Disconnect this computer?', 'Tracking keeps working in local mode and your history stays here. Your team stops getting new time from this computer.', 'Disconnect',
+        n = self.eng.store.unsent(); extra = f' {n} records have not reached the server yet; TrueDuty tries to send them first.' if n else ''
+        self.confirm('Disconnect this computer?', 'Tracking keeps working in local mode and your history stays here. Your team stops getting new time from this computer.' + extra, 'Disconnect',
                      lambda: self.bg(self.eng.disconnect, lambda r, er: self.main()), danger=True)
 
     # ---- connect to a team ----
     def connect_dialog(self):
-        e = self.eng; st = {'mode': 'Code', 'busy': False}; w = {}
+        e = self.eng; st = {'mode': 'Browser', 'busy': False}; w = {}
         def body(p, d):
             self.lab('Server address', 12, 'MUT', parent=p).pack(anchor='w', pady=(14, 4)); w['url'] = self.entry('taskdash.example.com', parent=p); w['url'].pack(fill='x'); w['url'].insert(0, e.cfg.get('server', ''))
-            seg = Seg(p, ['Code', 'Password', 'Google'], lambda v: (st.update(mode=v), show()), height=32, font_=font(12, True)); seg.pack(fill='x', pady=(14, 0)); seg.set('Code')
+            seg = Seg(p, ['Browser', 'Code', 'Password'], lambda v: (st.update(mode=v), show()), height=32, font_=font(12, True)); seg.pack(fill='x', pady=(14, 0)); seg.set('Browser')
             w['area'] = ctk.CTkFrame(p, fg_color='transparent', height=0); w['area'].pack(fill='x')
             d.msg = self.lab('', 12, 'MUT', parent=p, wraplength=380); d.msg.pack(anchor='w', pady=(10, 0))
             def show():
@@ -730,7 +784,7 @@ class UI:
                     self.lab('E-mail', 12, 'MUT', parent=a).pack(anchor='w', pady=(12, 4)); w['email'] = self.entry('you@example.com', parent=a); w['email'].pack(fill='x'); w['email'].insert(0, e.cfg.get('email', ''))
                     self.lab('Password', 12, 'MUT', parent=a).pack(anchor='w', pady=(10, 4)); w['pw'] = self.entry(parent=a, show='*'); w['pw'].pack(fill='x')
                 else:
-                    self.lab('Your browser opens. Sign in with Google there, approve this computer, and come back. TrueDuty finishes by itself.', 12, 'MUT', parent=a, wraplength=380).pack(anchor='w', pady=(12, 0))
+                    self.lab('Your browser opens the team website. Sign in there with Google or your e-mail and password, then approve this computer. The website hands a one-time pass back to TrueDuty on this computer, TrueDuty checks it with the server, and you are connected.', 12, 'MUT', parent=a, wraplength=380).pack(anchor='w', pady=(12, 0))
                 d.update_idletasks(); d.place(460)
             def team_fields():
                 code = w['code'].get().strip(); is_team = bool(re.fullmatch(r'[A-Za-z0-9]{4}-?[A-Za-z0-9]{4}', code)) and not code.replace('-', '').isdigit()
@@ -769,11 +823,9 @@ class UI:
             def work():
                 e.open_server(url, trust)
                 if body_ is not None: e.login(body_); return True
-                r = e.google_begin(); self.q.put(('call', lambda: (d.msg.configure(text='Waiting for you to approve this computer in your browser.', text_color=C['MUT']))))
-                webbrowser.open(r['url']); t0 = time.time()
-                while time.time() - t0 < r.get('expires', 600) and not d.done:
-                    time.sleep(2)
-                    if e.google_poll(r['nonce']): return True
+                r = e.browser_begin(); self.q.put(('call', lambda: (d.msg.configure(text='Waiting for you to sign in and approve this computer in your browser.', text_color=C['MUT']))))
+                webbrowser.open(r['url'])
+                if e.browser_wait(r, lambda: d.done): return True
                 raise NetError('Sign-in was not approved in time. Try again.')
             def done(r, er):
                 st['busy'] = False

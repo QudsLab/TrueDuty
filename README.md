@@ -13,13 +13,15 @@ Get the latest build from [Releases](https://github.com/QudsLab/TrueDuty/release
 
 | System | CPU | Installer | Portable |
 |---|---|---|---|
-| Windows 10/11 | x64 (Intel, AMD) | `TrueDuty-Setup-<v>-windows-x64.exe` | `TrueDuty-<v>-windows-x64-portable.zip` |
-| Windows 11 | ARM64 (Snapdragon) | `TrueDuty-Setup-<v>-windows-arm64.exe` | `TrueDuty-<v>-windows-arm64-portable.zip` |
+| Windows 10/11 | x64 (Intel, AMD) | `TrueDuty-<v>-windows-x64.msi` or `TrueDuty-Setup-<v>-windows-x64.exe` | `TrueDuty-<v>-windows-x64-portable.zip` |
+| Windows 11 | ARM64 (Snapdragon) | `TrueDuty-<v>-windows-arm64.msi` or `TrueDuty-Setup-<v>-windows-arm64.exe` | `TrueDuty-<v>-windows-arm64-portable.zip` |
 | macOS 12+ | Apple silicon | `TrueDuty-<v>-macos-arm64.dmg` or `.pkg` | `TrueDuty-<v>-macos-arm64-portable.zip` |
 | macOS 12+ | Intel | `TrueDuty-<v>-macos-x64.dmg` or `.pkg` | `TrueDuty-<v>-macos-x64-portable.zip` |
 | Linux (Debian, Ubuntu, Mint) | x64 / ARM64 | `trueduty_<v>_amd64.deb` / `_arm64.deb` | `TrueDuty-<v>-linux-<arch>-portable.tar.gz` |
 | Linux (Fedora, RHEL, openSUSE) | x64 / ARM64 | `trueduty-<v>.x86_64.rpm` / `.aarch64.rpm` | same |
 | Any Linux | x64 / ARM64 | `TrueDuty-<v>-linux-<arch>.AppImage` (single file) | same |
+
+The `.msi` is the standard Windows Installer package: double-click it, or deploy it silently with `msiexec /i TrueDuty-<v>-windows-x64.msi /qn` (Intune, GPO, SCCM). It installs to Program Files, adds Start menu and desktop shortcuts, upgrades older versions in place and uninstalls from Apps and features. Use either the `.msi` or the Setup `.exe`, not both.
 
 Installers keep data in `%APPDATA%\trueduty` or `~/.config/trueduty`. Portable builds keep everything in a `TrueDuty-data` folder next to the app and leave nothing behind; any build becomes portable when a file named `portable` sits next to it.
 
@@ -69,7 +71,16 @@ flowchart LR
       X4 --> C1[Six digit code from the panel]
       X4 --> C2[Team code ABCD-EFGH: creates the account]
       X4 --> C3[E-mail and password]
-      X4 --> C4[Google: approve in the browser]
+      X4 --> C4[Browser: Google or e-mail and password]
+    end
+    subgraph Browser sign-in
+      C4 --> B1[App listens on 127.0.0.1 only, opens the website]
+      B1 --> B2[Person signs in and approves this computer]
+      B2 --> B3[Website sends the browser to 127.0.0.1 with a one-time grant]
+      B3 --> B4[App sends the grant to the server over the PQC channel]
+      B4 --> B5{Server: grant valid, unused, not expired?}
+      B5 -- Yes --> B6[Device token issued, connected]
+      B5 -- No --> B7[Refused, start again]
     end
 ```
 
@@ -98,13 +109,18 @@ Linux needs `python3-tk`; window titles on X11 need `xdotool`.
 
 ## Local mode
 
-With no server connected TrueDuty still tracks: projects you add in Settings, activity per minute (keyboard and mouse event counts, never the keys), the active app and, if you allow it, window titles. Insights shows day, week, month, year and any custom range. Nothing leaves the computer.
+With no server connected TrueDuty still tracks: projects you add in Settings, activity per minute: key presses, clicks, scroll steps, pointer moves, pointer distance and the seconds that had any input (counts only, never which keys), the active app and, if you allow it, window titles. Insights shows day, week, month, year and any custom range. Nothing leaves the computer.
 
 ## Connected mode
 
-Settings, Connect to a team. Type the server address, check the key fingerprint against the panel, then sign in with a six digit code, a team code, your password or Google.
+Settings, Connect to a team. Type the server address, check the key fingerprint against the panel, then sign in:
+
+- Browser (default): the website opens, you sign in with Google or your e-mail and password and approve the computer. The website hands a one-time grant to TrueDuty through `http://127.0.0.1:<port>/callback` on your own computer; TrueDuty sends it to the server, which checks that it belongs to this sign-in, is unused and not expired, then issues the device token. A grant works once.
+- Six digit code from the panel, a team code (creates your account), or e-mail and password typed in the app.
 
 ### Offline and the signed log
+
+With no network TrueDuty keeps tracking and checks for the server every 15 seconds (backing off to 2 minutes). When the connection is back, everything waiting is uploaded in order. A record leaves the outbox only after the server confirms it was stored; idle minutes are marked, never deleted.
 
 Every record (entries, activity minutes, breaks, idle gaps) is written to a local outbox chained by HMAC-SHA256 with a key only this device and the server know. When the server is unreachable the app keeps tracking. On sync the server accepts records only in sequence and only when each one's MAC and back link match. Deleting, editing or reordering records breaks the chain; the server then marks the device and tells the admins. This makes tampering detectable, not impossible: someone with full control of the machine can still choose not to run the app.
 

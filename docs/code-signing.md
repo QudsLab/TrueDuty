@@ -7,7 +7,7 @@ Goal: every TrueDuty download opens without "unknown publisher" or antivirus war
 | Measure | Why it helps |
 |---|---|
 | Nuitka **standalone** folders, never one-file builds | One-file executables unpack themselves to a temp folder on every start. Packers used by malware do the same, so antivirus heuristics flag it. A plain folder installed by a normal installer is what every commercial app ships. |
-| Real installers (Inno Setup, dmg/pkg, deb/rpm) | Installed apps in Program Files / Applications / /opt look normal to Defender and Gatekeeper. |
+| Real installers (Windows Installer .msi and Inno Setup .exe, dmg/pkg, deb/rpm) | Installed apps in Program Files / Applications / /opt look normal to Defender and Gatekeeper. |
 | Full version resource on Windows files (company, product, version, copyright) | Files without metadata score worse in reputation systems. |
 | No UPX or other packers | Packed binaries are a top false positive cause. |
 | Sigstore build provenance on every file | `gh attestation verify <file> --repo QudsLab/TrueDuty` proves the file was built by this workflow from a given commit. |
@@ -21,7 +21,7 @@ The workflow uses the first option whose secrets exist.
 
 1. **SignPath Foundation (free for open source, recommended).**
    Apply at signpath.org with this public MIT repository. Builds must come from GitHub Actions, which this workflow does.
-   After approval create a project with two artifact configurations named `files` (a folder of exe/dll/pyd) and `installer` (one exe), then set:
+   After approval create a project with two artifact configurations named `files` (a folder of exe/dll/pyd) and `installer` (the .msi and the Setup .exe), then set:
    secrets `SIGNPATH_API_TOKEN`, `SIGNPATH_ORGANIZATION_ID`; variables `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_POLICY_SLUG`.
    The certificate is issued to "SignPath Foundation" as publisher.
 2. **Azure Trusted Signing** (low monthly fee, check Microsoft's current eligibility rules for your country and entity type).
@@ -29,7 +29,7 @@ The workflow uses the first option whose secrets exist.
 3. **Any exportable .pfx certificate** (OV or EV from Certum, Sectigo, DigiCert and others; Certum sells an open source certificate to individuals).
    Secrets `WIN_CERT_PFX_BASE64` (`base64 -w0 cert.pfx`) and `WIN_CERT_PASSWORD`. Certificates kept only on a hardware token or a cloud HSM cannot be exported and need option 1 or 2.
 
-Every exe, dll and pyd in the app folder is signed first, then the installer. The job log ends with a signature report.
+Every exe, dll and pyd in the app folder is signed first, then the .msi and the Setup .exe. The job log ends with a signature report.
 
 SmartScreen reputation builds per certificate over downloads; a new certificate may still show a warning for the first releases.
 

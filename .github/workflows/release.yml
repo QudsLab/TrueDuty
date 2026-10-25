@@ -1,5 +1,5 @@
 # Builds, signs and releases TrueDuty for every common desktop:
-#   Windows x64 and ARM64   installer (Setup .exe)  + portable .zip
+#   Windows x64 and ARM64   .msi installer + Setup .exe installer + portable .zip
 #   macOS Apple silicon and Intel   .dmg + .pkg installer + portable .zip
 #   Linux x64 and ARM64     .deb + .rpm installers, .AppImage, portable .tar.gz
 # Triggers: push to main/master -> v2.0.<run>, tag v1.2.3 -> v1.2.3, or Run workflow by hand.
@@ -115,6 +115,10 @@ jobs:
         shell: pwsh
         env: { WIN_CERT_PFX_BASE64: '${{ secrets.WIN_CERT_PFX_BASE64 }}', WIN_CERT_PASSWORD: '${{ secrets.WIN_CERT_PASSWORD }}' }
         run: ./app/packaging/sign-pfx.ps1 app/dist/TrueDuty
+      - name: .NET for the WiX MSI builder (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/setup-dotnet@v4
+        with: { dotnet-version: '8.0.x' }
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -123,7 +127,11 @@ jobs:
         if: runner.os == 'Windows' && env.HAS_SIGNPATH == 'true'
         id: sp2
         uses: actions/upload-artifact@v4
-        with: { name: 'unsigned-setup-${{ matrix.arch }}', path: 'out/TrueDuty-Setup-*.exe' }
+        with:
+          name: 'unsigned-setup-${{ matrix.arch }}'
+          path: |
+            out/TrueDuty-Setup-*.exe
+            out/*.msi
       - name: SignPath sign (installer)
         if: runner.os == 'Windows' && env.HAS_SIGNPATH == 'true'
         uses: signpath/github-action-submit-signing-request@v1
@@ -147,7 +155,7 @@ jobs:
           trusted-signing-account-name: ${{ vars.AZURE_TS_ACCOUNT }}
           certificate-profile-name: ${{ vars.AZURE_TS_PROFILE }}
           files-folder: out
-          files-folder-filter: exe
+          files-folder-filter: exe,msi
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
@@ -155,11 +163,11 @@ jobs:
         if: runner.os == 'Windows' && env.HAS_SIGNPATH != 'true' && env.HAS_AZURE != 'true' && env.HAS_PFX == 'true'
         shell: pwsh
         env: { WIN_CERT_PFX_BASE64: '${{ secrets.WIN_CERT_PFX_BASE64 }}', WIN_CERT_PASSWORD: '${{ secrets.WIN_CERT_PASSWORD }}' }
-        run: Get-ChildItem out -Filter 'TrueDuty-Setup-*.exe' | ForEach-Object { ./app/packaging/sign-pfx.ps1 $_.FullName }
+        run: Get-ChildItem out -Include 'TrueDuty-Setup-*.exe', '*.msi' -Recurse | ForEach-Object { ./app/packaging/sign-pfx.ps1 $_.FullName }
       - name: Signature report (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Get-ChildItem out, app/dist/TrueDuty -Recurse -Include *.exe | ForEach-Object { $s = Get-AuthenticodeSignature $_.FullName; "{0,-60} {1} {2}" -f $_.Name, $s.Status, $s.SignerCertificate.Subject }
+        run: Get-ChildItem out, app/dist/TrueDuty -Recurse -Include *.exe, *.msi | ForEach-Object { $s = Get-AuthenticodeSignature $_.FullName; "{0,-60} {1} {2}" -f $_.Name, $s.Status, $s.SignerCertificate.Subject }
 
       # ---------------- macOS ----------------
       - name: Import Apple certificates
@@ -235,7 +243,7 @@ jobs:
             printf '%s\n\nCommit %s\n\n' "$COMMIT_MSG" "${GITHUB_SHA::7}"
             echo '| System | Installer | Portable |'
             echo '|---|---|---|'
-            echo '| Windows x64 / ARM64 | `TrueDuty-Setup-*-windows-<arch>.exe` | `*-windows-<arch>-portable.zip` |'
+            echo '| Windows x64 / ARM64 | `TrueDuty-*-windows-<arch>.msi` (or `TrueDuty-Setup-*.exe`) | `*-windows-<arch>-portable.zip` |'
             echo '| macOS Apple silicon / Intel | `.dmg` or `.pkg` | `*-macos-<arch>-portable.zip` |'
             echo '| Linux x64 / ARM64 | `.deb`, `.rpm` or `.AppImage` | `*-linux-<arch>-portable.tar.gz` |'
             printf '\nVerify: `sha256sum -c SHA256SUMS.txt --ignore-missing` or `gh attestation verify <file> --repo %s`.\n' "$GITHUB_REPOSITORY"

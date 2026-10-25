@@ -4,7 +4,6 @@ name: release
 on:
   push:
     branches: [main, master]
-    paths: ['app/**', '.github/workflows/release.yml']
   workflow_dispatch:
 permissions:
   contents: write
@@ -25,8 +24,8 @@ jobs:
       matrix:
         include:
           - { os: windows-latest, plat: windows-x64, file: TrueDuty.exe, ext: .exe }
-          - { os: macos-14,       plat: macos-arm64, file: TrueDuty.app, ext: .zip }
-          - { os: macos-13,       plat: macos-x64,   file: TrueDuty.app, ext: .zip }
+          - { os: macos-15,       plat: macos-arm64, file: TrueDuty.app, ext: .zip }
+          - { os: macos-15-intel, plat: macos-x64,   file: TrueDuty.app, ext: .zip }
           - { os: ubuntu-22.04,   plat: linux-x64,   file: TrueDuty.bin, ext: '' }
     runs-on: ${{ matrix.os }}
     env:
@@ -39,7 +38,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y python3-tk patchelf ccache libxss1
       - name: Python packages
-        run: python -m pip install -r app/requirements.txt
+        run: python -m pip install -r app/requirements.txt imageio
       - name: Stamp version
         shell: bash
         run: sed -i.bak "s/^APP = 'TrueDuty'; VERSION = '[^']*'/APP = 'TrueDuty'; VERSION = '${TD_VERSION}'/" app/main.py && rm -f app/main.py.bak
@@ -50,14 +49,21 @@ jobs:
         shell: bash
         run: |
           mkdir -p out; name="TrueDuty-${TD_VERSION}-${{ matrix.plat }}${{ matrix.ext }}"
-          if [ "${{ matrix.ext }}" = ".zip" ]; then (cd app/dist && ditto -c -k --keepParent "${{ matrix.file }}" "../../out/$name");
-          else src="app/dist/${{ matrix.file }}"; [ -f "$src" ] || src="app/dist/TrueDuty"; cp "$src" "out/$name"; fi
+          if [ "${{ matrix.ext }}" = ".zip" ]; then
+            bundle=$(ls -d app/dist/*.app | head -1); [ -n "$bundle" ] || { echo "no .app bundle in app/dist"; ls -la app/dist; exit 1; }
+            mv "$bundle" app/dist/TrueDuty.app 2>/dev/null || true
+            (cd app/dist && ditto -c -k --keepParent TrueDuty.app "../../out/$name")
+          else
+            src="app/dist/${{ matrix.file }}"; [ -f "$src" ] || src="app/dist/TrueDuty"; [ -f "$src" ] || { echo "no build output"; ls -la app/dist; exit 1; }
+            cp "$src" "out/$name"; chmod +x "out/$name"
+          fi
           cd out && (sha256sum "$name" 2>/dev/null || shasum -a 256 "$name") > "$name.sha256"
       - uses: actions/upload-artifact@v4
         with: { name: '${{ matrix.plat }}', path: out/* }
 
   publish:
     needs: [version, build]
+    if: ${{ !cancelled() && needs.version.result == 'success' }}   # publish what was built even if one system failed
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -66,6 +72,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           V: ${{ needs.version.outputs.v }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
-          msg=$(printf '%s\n\nCommit %s' "${{ github.event.head_commit.message }}" "${GITHUB_SHA::7}" | head -c 1800)
+          ls out/* >/dev/null 2>&1 || { echo "nothing was built"; exit 1; }
+          msg=$(printf '%s\n\nCommit %s\n\nWindows: run the .exe. macOS: unzip, move TrueDuty to Applications, right click and Open the first time. Linux: chmod +x and run.' "$COMMIT_MSG" "${GITHUB_SHA::7}" | head -c 1800)
           gh release create "v$V" out/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "TrueDuty $V" --notes "$msg"

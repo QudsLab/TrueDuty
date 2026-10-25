@@ -12,8 +12,12 @@ APP = 'TrueDuty'; VERSION = '2.0.0'  # CI replaces this with the release number
 OS = platform.system()
 HERE = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, 'frozen', False) else __file__))
 ASSETS = os.path.join(HERE, 'assets')
+# Portable build: the file name contains "portable", or a file named "portable" sits next to it. Data then lives next to the app.
+EXE = os.path.abspath(sys.argv[0]) if getattr(sys, 'frozen', False) or '__compiled__' in globals() else ''
+PORTABLE = bool(EXE) and ('portable' in os.path.basename(EXE).lower() or os.path.exists(os.path.join(os.path.dirname(EXE), 'portable'))) or os.environ.get('TRUEDUTY_PORTABLE') == '1'
 def cfg_dir():
-    d = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~/.config'), APP.lower())
+    if PORTABLE: d = os.path.join(os.path.dirname(EXE) if EXE else HERE, 'TrueDuty-data')
+    else: d = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~/.config'), APP.lower())
     os.makedirs(d, exist_ok=True); return d
 CFG_FILE = os.path.join(cfg_dir(), 'config.json')
 def load_cfg():

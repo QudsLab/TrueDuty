@@ -1,0 +1,183 @@
+# Builds TrueDuty for Windows, macOS and Linux and publishes a GitHub release.
+#   push to main/master  -> release v2.0.<run number>
+#   push a tag v1.2.3     -> release v1.2.3
+#   Actions tab, Run      -> same as a push
+# Every OS gets an installer and a portable build:
+#   Windows  TrueDuty-Setup-<v>-windows-x64.exe (installer)   TrueDuty-<v>-windows-x64-portable.exe
+#   macOS    TrueDuty-<v>-macos-<arch>.dmg (installer)        TrueDuty-<v>-macos-<arch>-portable.zip
+#   Linux    trueduty_<v>_amd64-linux.deb (installer)         TrueDuty-<v>-linux-x64-portable
+# Signing: every file gets a GitHub build provenance attestation (Sigstore), plus SHA256SUMS.txt.
+# Platform code signing runs when these repository secrets exist (Settings, Secrets and variables, Actions):
+#   Windows  WIN_CERT_PFX_BASE64, WIN_CERT_PASSWORD
+#   macOS    MAC_CERT_P12_BASE64, MAC_CERT_PASSWORD, MAC_IDENTITY ("Developer ID Application: Name (TEAMID)"),
+#            and for notarization APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
+#   Linux    GPG_PRIVATE_KEY (armored), GPG_PASSPHRASE   -> detached .asc signatures
+# Without them macOS builds are ad hoc signed, which Apple silicon needs to start the app.
+name: release
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs: { v: '${{ steps.v.outputs.v }}' }
+    steps:
+      - id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF#refs/tags/v}"; else v="2.0.${{ github.run_number }}"; fi
+          echo "v=$v" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, plat: windows-x64 }
+          - { os: macos-15,       plat: macos-arm64 }
+          - { os: macos-15-intel, plat: macos-x64 }
+          - { os: ubuntu-22.04,   plat: linux-x64 }
+    runs-on: ${{ matrix.os }}
+    env:
+      TD_VERSION: ${{ needs.version.outputs.v }}
+      PLAT: ${{ matrix.plat }}
+      HAS_GPG: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip, cache-dependency-path: app/requirements.txt }
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk patchelf ccache libxss1
+      - name: Python packages
+        run: python -m pip install -r app/requirements.txt imageio zstandard ordered-set
+      - name: Stamp version
+        shell: bash
+        run: sed -i.bak "s/^APP = 'TrueDuty'; VERSION = '[^']*'/APP = 'TrueDuty'; VERSION = '${TD_VERSION}'/" app/main.py && rm -f app/main.py.bak
+      - name: Build
+        working-directory: app
+        run: python build.py
+        timeout-minutes: 90
+
+      # ---------- Windows ----------
+      - name: Windows sign and package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WIN_CERT_PFX_BASE64: ${{ secrets.WIN_CERT_PFX_BASE64 }}
+          WIN_CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out | Out-Null
+          $exe = Get-ChildItem app/dist -Filter *.exe | Select-Object -First 1
+          if (-not $exe) { Get-ChildItem app/dist; throw 'no exe in app/dist' }
+          $sign = $null
+          if ($env:WIN_CERT_PFX_BASE64) {
+            [IO.File]::WriteAllBytes("$PWD\cert.pfx", [Convert]::FromBase64String($env:WIN_CERT_PFX_BASE64))
+            $sign = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe | Where-Object FullName -match 'x64' | Select-Object -Last 1
+          }
+          function Sign($f) { if ($sign) { & $sign.FullName sign /f cert.pfx /p $env:WIN_CERT_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 $f; if ($LASTEXITCODE) { throw 'signtool failed' } } }
+          Sign $exe.FullName
+          Copy-Item $exe.FullName "out/TrueDuty-$env:TD_VERSION-windows-x64-portable.exe"
+          choco install innosetup -y --no-progress | Out-Null
+          $iscc = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup*\ISCC.exe", "$env:ProgramFiles\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) { throw 'Inno Setup not found' }
+          & $iscc.FullName "/DAppVersion=$env:TD_VERSION" "/DSrcExe=$($exe.FullName)" "/DOutDir=$PWD\out" app\packaging\trueduty.iss
+          if ($LASTEXITCODE) { throw 'installer build failed' }
+          Get-ChildItem out -Filter 'TrueDuty-Setup-*.exe' | ForEach-Object { Sign $_.FullName }
+          Remove-Item cert.pfx -ErrorAction SilentlyContinue
+
+      # ---------- macOS ----------
+      - name: macOS sign and package
+        if: runner.os == 'macOS'
+        env:
+          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          MAC_IDENTITY: ${{ secrets.MAC_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          bundle=$(ls -d app/dist/*.app | head -1); [ -n "$bundle" ] || { ls -la app/dist; exit 1; }
+          [ "$bundle" = "app/dist/TrueDuty.app" ] || mv "$bundle" app/dist/TrueDuty.app
+          app=app/dist/TrueDuty.app; id="-"
+          if [ -n "${MAC_CERT_P12_BASE64:-}" ]; then
+            kc=$RUNNER_TEMP/build.keychain; security create-keychain -p ci "$kc"; security set-keychain-settings "$kc"; security unlock-keychain -p ci "$kc"
+            echo "$MAC_CERT_P12_BASE64" | base64 --decode > $RUNNER_TEMP/cert.p12
+            security import $RUNNER_TEMP/cert.p12 -k "$kc" -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -s -k ci "$kc"; security list-keychains -d user -s "$kc" login.keychain
+            id="$MAC_IDENTITY"
+          fi
+          if [ "$id" = "-" ]; then codesign --force --deep --sign - "$app"; else codesign --force --deep --options runtime --timestamp --sign "$id" "$app"; fi
+          ditto -c -k --keepParent "$app" "out/TrueDuty-${TD_VERSION}-${PLAT}-portable.zip"
+          mkdir -p dmg && cp -R "$app" dmg/ && ln -s /Applications dmg/Applications
+          hdiutil create -volname "TrueDuty" -srcfolder dmg -ov -format UDZO "out/TrueDuty-${TD_VERSION}-${PLAT}.dmg"
+          if [ "$id" != "-" ]; then codesign --force --sign "$id" "out/TrueDuty-${TD_VERSION}-${PLAT}.dmg"; fi
+          if [ "$id" != "-" ] && [ -n "${APPLE_ID:-}" ]; then
+            xcrun notarytool submit "out/TrueDuty-${TD_VERSION}-${PLAT}.dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+            xcrun stapler staple "out/TrueDuty-${TD_VERSION}-${PLAT}.dmg"
+          fi
+
+      # ---------- Linux ----------
+      - name: Linux package
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          bin=app/dist/TrueDuty; [ -f "$bin" ] || bin=$(ls app/dist/*.bin | head -1); [ -f "$bin" ] || { ls -la app/dist; exit 1; }
+          cp "$bin" "out/TrueDuty-${TD_VERSION}-${PLAT}-portable"; chmod +x "out/TrueDuty-${TD_VERSION}-${PLAT}-portable"
+          d=deb; mkdir -p $d/DEBIAN $d/opt/trueduty $d/usr/bin $d/usr/share/applications $d/usr/share/icons/hicolor/512x512/apps
+          cp "$bin" $d/opt/trueduty/TrueDuty; chmod 755 $d/opt/trueduty/TrueDuty; ln -s /opt/trueduty/TrueDuty $d/usr/bin/trueduty
+          cp app/assets/logo.png $d/usr/share/icons/hicolor/512x512/apps/trueduty.png
+          printf '[Desktop Entry]\nName=TrueDuty\nComment=Time and activity tracker\nExec=/opt/trueduty/TrueDuty\nIcon=trueduty\nTerminal=false\nType=Application\nCategories=Office;Utility;\n' > $d/usr/share/applications/trueduty.desktop
+          printf 'Package: trueduty\nVersion: %s\nSection: utils\nPriority: optional\nArchitecture: amd64\nDepends: libxss1, libx11-6\nRecommends: xdotool\nMaintainer: QudsLab <noreply@github.com>\nHomepage: https://github.com/QudsLab/TrueDuty\nDescription: TrueDuty time and activity tracker\n Local-first tracker that can connect to a TaskDash team.\n' "$TD_VERSION" > $d/DEBIAN/control
+          dpkg-deb --root-owner-group --build $d "out/trueduty_${TD_VERSION}_amd64-linux.deb"
+
+      - name: GPG signatures
+        if: env.HAS_GPG == 'true'
+        shell: bash
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          for f in out/*; do gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --armor --detach-sign "$f"; done
+      - name: Checksums
+        shell: bash
+        run: cd out && for f in *; do case "$f" in *.asc) ;; *) (sha256sum "$f" 2>/dev/null || shasum -a 256 "$f") > "$f.sha256";; esac; done; ls -la
+      - name: Build provenance (Sigstore)
+        uses: actions/attest-build-provenance@v2
+        with: { subject-path: 'out/*' }
+      - uses: actions/upload-artifact@v4
+        with: { name: '${{ matrix.plat }}', path: out/* }
+
+  publish:
+    needs: [version, build]
+    if: ${{ !cancelled() && needs.version.result == 'success' }}   # publish what was built even if one system failed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.version.outputs.v }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          ls out/* >/dev/null 2>&1 || { echo "nothing was built"; exit 1; }
+          (cd out && cat *.sha256 > SHA256SUMS.txt)
+          msg=$(printf '%s\n\nCommit %s\n\n**Installer**: Windows TrueDuty-Setup .exe, macOS .dmg, Linux .deb.\n**Portable**: Windows -portable.exe, macOS -portable.zip, Linux -portable binary. Portable builds keep their data in a TrueDuty-data folder next to the app.\n\nVerify: `sha256sum -c SHA256SUMS.txt` or `gh attestation verify <file> --repo %s`.' "$COMMIT_MSG" "${GITHUB_SHA::7}" "$GITHUB_REPOSITORY" | head -c 3000)
+          gh release delete "v$V" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          gh release create "v$V" out/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "TrueDuty $V" --notes "$msg"
